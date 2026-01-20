@@ -25,6 +25,11 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
+      - name: Install Dependencies
+        run: |
+          forge install foundry-rs/forge-std 
+          forge install OpenZeppelin/openzeppelin-contracts
+
       - name: Show Forge version
         run: forge --version
 

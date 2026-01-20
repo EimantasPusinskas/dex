@@ -5,5 +5,8 @@ libs = ['lib']
 
 remappings = [
     'forge-std/=lib/forge-std/src/',
+    'openzeppelin-contracts/=lib/openzeppelin-contracts/contracts/'
 ]
 
+[profile.ci]
+verbosity = 2
