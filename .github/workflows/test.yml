@@ -27,9 +27,8 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          rm -rf lib
           forge install foundry-rs/forge-std 
-          forge install OpenZeppelin/openzeppelin-contracts@v5.2.0 
+          forge install OpenZeppelin/openzeppelin-contracts
 
       - name: Show Forge version
         run: forge --version
