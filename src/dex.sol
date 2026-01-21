@@ -22,7 +22,7 @@ import {SafeERC20} from "openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol"
  * - Slippage protection via minAmountOut parameter
  * - Transaction deadline to prevent stale transactions
  * - Minimum liquidity lock (1000 wei) to prevent manipulation
- * 
+ *
  * Example Usage:
  * 1. Approve both tokens for the DEX contract
  * 2. Call addLiquidity(amountA, amountB) to receive LP tokens
@@ -210,10 +210,10 @@ contract DEX is ReentrancyGuard {
      * @dev Uses constant product formula: x * y = k
      *      Charges 0.3% fee (997/1000 of input goes to calculation)
      *      Formula: amountOut = (amountIn * 997 * reserveOut) / (reserveIn * 1000 + amountIn * 997)
-     *      
+     *
      *      Security: Protected against reentrancy via nonReentrant modifier.
      *      Users MUST approve this contract before calling swap.
-     *      
+     *
      * @param amountIn Amount of input tokens
      * @param minAmountOut Minimum amount of output tokens (slippage protection)
      * @param tokenIn Address of input token (must be tokenA or tokenB)
