@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {Test, console} from "forge-std/Test.sol";
 import {DEX} from "../src/dex.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
+import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 
 contract DEXTest is Test {
     DEX public dex;
@@ -49,19 +50,27 @@ contract DEXTest is Test {
 
         uint256 shares = dex.addLiquidity(amountA, amountB);
 
-        // Check shares minted (should be sqrt(1000 * 2000) * 10^18)
-        uint256 expectedShares = 1414213562373095048801; // sqrt(2_000_000) * 10^18
-        assertEq(shares, expectedShares, "Incorrect shares minted");
+        // Check shares minted
+        // Total = sqrt(1000 * 2000) * 10^18 = 1414213562373095048801
+        // Locked = 1000
+        // Alice gets = Total - 1000
+        uint256 expectedTotal = 1414213562373095048801;
+        uint256 expectedAliceShares = expectedTotal - 1000;
+
+        assertEq(shares, expectedAliceShares, "Incorrect shares minted");
 
         // Check reserves updated
         assertEq(dex.reserveA(), amountA, "Reserve A incorrect");
         assertEq(dex.reserveB(), amountB, "Reserve B incorrect");
 
-        // Check total supply
-        assertEq(dex.totalSupply(), expectedShares, "Total supply incorrect");
+        // Check total supply (includes locked shares)
+        assertEq(dex.totalSupply(), expectedTotal, "Total supply incorrect");
 
-        // Check user balance
-        assertEq(dex.balanceOf(alice), expectedShares, "User shares incorrect");
+        // Check user balance (excludes locked shares)
+        assertEq(dex.balanceOf(alice), expectedAliceShares, "User shares incorrect");
+
+        // Check locked shares
+        assertEq(dex.balanceOf(address(0)), 1000, "Locked shares incorrect");
 
         vm.stopPrank();
     }
@@ -113,16 +122,22 @@ contract DEXTest is Test {
         // Remove all liquidity
         (uint256 amountA, uint256 amountB) = dex.removeLiquidity(shares);
 
-        // Check amounts returned
-        assertEq(amountA, 1000 * 10 ** 18, "Incorrect amountA returned");
-        assertEq(amountB, 2000 * 10 ** 18, "Incorrect amountB returned");
+        // Alice can only remove her shares, not the locked 1000 shares
+        // So she gets: (her_shares / total_supply) * reserve
+        uint256 totalSupplyAfterAdd = dex.totalSupply() + shares; // Need to add back since we removed
+        uint256 expectedAmountA = (shares * 1000 * 10 ** 18) / totalSupplyAfterAdd;
+        uint256 expectedAmountB = (shares * 2000 * 10 ** 18) / totalSupplyAfterAdd;
 
-        // Check reserves are zero
-        assertEq(dex.reserveA(), 0, "Reserve A should be zero");
-        assertEq(dex.reserveB(), 0, "Reserve B should be zero");
+        // Check amounts returned (allow small rounding error)
+        assertApproxEqAbs(amountA, expectedAmountA, 1000, "Incorrect amountA returned");
+        assertApproxEqAbs(amountB, expectedAmountB, 1000, "Incorrect amountB returned");
 
-        // Check total supply is zero
-        assertEq(dex.totalSupply(), 0, "Total supply should be zero");
+        // Reserves should have 1000 shares worth left (locked)
+        assertGt(dex.reserveA(), 0, "Reserve A should not be zero (locked shares remain)");
+        assertGt(dex.reserveB(), 0, "Reserve B should not be zero (locked shares remain)");
+
+        // Check total supply has Alice's shares removed but locked shares remain
+        assertEq(dex.totalSupply(), 1000, "Total supply should be 1000 (locked shares)");
 
         // Check alice got tokens back
         assertEq(tokenA.balanceOf(alice), aliceTokenABefore + amountA, "Alice didn't receive tokenA");
@@ -136,17 +151,25 @@ contract DEXTest is Test {
         vm.startPrank(alice);
         uint256 shares = dex.addLiquidity(1000 * 10 ** 18, 2000 * 10 ** 18);
 
-        // Remove half
+        // Remove half of Alice's shares
         uint256 sharesToRemove = shares / 2;
         (uint256 amountA, uint256 amountB) = dex.removeLiquidity(sharesToRemove);
 
-        // Should get back ~half of each token
-        assertApproxEqAbs(amountA, 500 * 10 ** 18, 1, "Incorrect amountA");
-        assertApproxEqAbs(amountB, 1000 * 10 ** 18, 1, "Incorrect amountB");
+        // Calculate expected amounts
+        uint256 totalSupply = shares + 1000; // Alice's shares + locked
+        uint256 expectedAmountA = (sharesToRemove * 1000 * 10 ** 18) / totalSupply;
+        uint256 expectedAmountB = (sharesToRemove * 2000 * 10 ** 18) / totalSupply;
 
-        // Check reserves reduced by half
-        assertApproxEqAbs(dex.reserveA(), 500 * 10 ** 18, 1, "Reserve A incorrect");
-        assertApproxEqAbs(dex.reserveB(), 1000 * 10 ** 18, 1, "Reserve B incorrect");
+        // Should get back proportional amount
+        assertApproxEqAbs(amountA, expectedAmountA, 1000, "Incorrect amountA");
+        assertApproxEqAbs(amountB, expectedAmountB, 1000, "Incorrect amountB");
+
+        // Check reserves reduced proportionally
+        uint256 expectedReserveA = 1000 * 10 ** 18 - amountA;
+        uint256 expectedReserveB = 2000 * 10 ** 18 - amountB;
+
+        assertApproxEqAbs(dex.reserveA(), expectedReserveA, 1000, "Reserve A incorrect");
+        assertApproxEqAbs(dex.reserveB(), expectedReserveB, 1000, "Reserve B incorrect");
 
         vm.stopPrank();
     }
@@ -310,9 +333,15 @@ contract DEXTest is Test {
     // ============ FUZZ TESTS ============
 
     function testFuzz_AddLiquidity(uint256 amountA, uint256 amountB) public {
-        // Bound inputs to reasonable ranges
-        amountA = bound(amountA, 1000, 1_000 * 10 ** 18);
-        amountB = bound(amountB, 1000, 1_000 * 10 ** 18);
+        // Bound to what Alice has AND ensure sqrt is > 1000 (MINIMUM_LIQUIDITY)
+        // sqrt(amountA * amountB) > 1000
+        // So we need amountA * amountB > 1_000_000
+        amountA = bound(amountA, 1001, 10_000 * 10 ** 18);
+        amountB = bound(amountB, 1001, 10_000 * 10 ** 18);
+
+        // Ensure sqrt will be > 1000
+        uint256 sqrtProduct = Math.sqrt(amountA * amountB);
+        vm.assume(sqrtProduct > 1000);
 
         vm.startPrank(alice);
         uint256 shares = dex.addLiquidity(amountA, amountB);
@@ -321,7 +350,10 @@ contract DEXTest is Test {
         assertGt(shares, 0, "Shares should be > 0");
         assertEq(dex.reserveA(), amountA, "Reserve A mismatch");
         assertEq(dex.reserveB(), amountB, "Reserve B mismatch");
-        assertEq(dex.balanceOf(alice), shares, "Balance mismatch");
+
+        // Alice should have shares (less 1000 locked on first deposit)
+        uint256 expectedShares = sqrtProduct - 1000;
+        assertEq(dex.balanceOf(alice), expectedShares, "Balance mismatch");
 
         vm.stopPrank();
     }
@@ -345,5 +377,91 @@ contract DEXTest is Test {
         assertGe(kAfter, kBefore, "k should not decrease");
 
         vm.stopPrank();
+    }
+
+    // Test minimum liquidity lock
+    function test_MinimumLiquidityLock() public {
+        vm.startPrank(alice);
+
+        uint256 amountA = 1000 * 10 ** 18;
+        uint256 amountB = 2000 * 10 ** 18;
+
+        uint256 shares = dex.addLiquidity(amountA, amountB);
+
+        // Check that 1000 shares are locked
+        assertEq(dex.balanceOf(address(0)), 1000, "Minimum liquidity not locked");
+
+        // Check alice got remaining shares
+        uint256 expectedTotal = Math.sqrt(amountA * amountB);
+        assertEq(shares, expectedTotal - 1000, "Alice should get total - locked");
+
+        vm.stopPrank();
+    }
+
+    function test_MinimumLiquidityLock_RevertsOnTooSmall() public {
+        vm.startPrank(alice);
+
+        // Try to add very small amounts (sqrt would be < 1000)
+        vm.expectRevert("Insufficient initial liquidity");
+        dex.addLiquidity(10, 10);
+
+        vm.stopPrank();
+    }
+
+    // Test view functions
+    function test_GetReserves() public {
+        vm.prank(alice);
+        dex.addLiquidity(1000 * 10 ** 18, 2000 * 10 ** 18);
+
+        (uint256 resA, uint256 resB) = dex.getReserves();
+        assertEq(resA, 1000 * 10 ** 18, "Reserve A mismatch");
+        assertEq(resB, 2000 * 10 ** 18, "Reserve B mismatch");
+    }
+
+    function test_GetPriceAInB() public {
+        vm.prank(alice);
+        dex.addLiquidity(1000 * 10 ** 18, 2000 * 10 ** 18);
+
+        uint256 price = dex.getPriceAInB();
+        assertEq(price, 2 * 10 ** 18, "Price should be 2e18");
+    }
+
+    function test_GetPriceBInA() public {
+        vm.prank(alice);
+        dex.addLiquidity(1000 * 10 ** 18, 2000 * 10 ** 18);
+
+        uint256 price = dex.getPriceBInA();
+        assertEq(price, 0.5 * 10 ** 18, "Price should be 0.5e18");
+    }
+
+    function test_GetPoolInfo() public {
+        vm.prank(alice);
+        dex.addLiquidity(1000 * 10 ** 18, 2000 * 10 ** 18);
+
+        (uint256 resA, uint256 resB, uint256 supply, uint256 priceAB, uint256 priceBA) = dex.getPoolInfo();
+
+        assertEq(resA, 1000 * 10 ** 18, "Reserve A");
+        assertEq(resB, 2000 * 10 ** 18, "Reserve B");
+        assertGt(supply, 1000, "Total supply > minimum");
+        assertEq(priceAB, 2 * 10 ** 18, "Price AB");
+        assertEq(priceBA, 0.5 * 10 ** 18, "Price BA");
+    }
+
+    function test_GetLPValue() public {
+        vm.prank(alice);
+        uint256 shares = dex.addLiquidity(1000 * 10 ** 18, 2000 * 10 ** 18);
+
+        (uint256 userShares, uint256 valueA, uint256 valueB) = dex.getLPValue(alice);
+
+        assertEq(userShares, shares, "Shares mismatch");
+
+        // Calculate expected values
+        // Alice owns shares/(shares+1000) of the pool
+        uint256 totalSupply = shares + 1000;
+        uint256 expectedValueA = (shares * 1000 * 10 ** 18) / totalSupply;
+        uint256 expectedValueB = (shares * 2000 * 10 ** 18) / totalSupply;
+
+        assertApproxEqAbs(valueA, expectedValueA, 1000, "Value A mismatch");
+        assertApproxEqAbs(valueB, expectedValueB, 1000, "Value B mismatch");
     }
 }
