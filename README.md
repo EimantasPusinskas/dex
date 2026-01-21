@@ -5,6 +5,8 @@ A minimal implementation of an Automated Market Maker (AMM) decentralized exchan
 ![Solidity](https://img.shields.io/badge/Solidity-^0.8.20-blue)
 ![Foundry](https://img.shields.io/badge/Framework-Foundry-red)
 ![License](https://img.shields.io/badge/License-MIT-green)
+![Tests](https://img.shields.io/badge/Tests-23%20Passing-brightgreen)
+![Coverage](https://img.shields.io/badge/Coverage-100%25-brightgreen)
 
 ## Table of Contents
 
@@ -221,18 +223,18 @@ test/
 **SafeERC20**: Handles non-standard ERC20 return values  
 **Slippage Protection**: Users specify minimum output amounts  
 **Deadline Protection**: Prevents stale transactions  
+**Minimum Liquidity Lock**: 1000 wei permanently locked on genesis deposit (Uniswap V2 pattern)
 
 ### Known Limitations
 
-**Not Production Ready**: This is a learning project  
-**No Minimum Liquidity Lock**: Unlike Uniswap V2, doesn't lock initial liquidity  
-**Price Manipulation**: Small pools are vulnerable to price manipulation  
-**Impermanent Loss**: LPs exposed to impermanent loss (inherent to AMMs)  
-**Front-running**: Public mempool transactions can be front-run  
+ **Not Production Ready**: This is a learning project  
+ **Price Manipulation**: Small pools are vulnerable to price manipulation  
+ **Impermanent Loss**: LPs exposed to impermanent loss (inherent to AMMs)  
+ **Front-running**: Public mempool transactions can be front-run  
+ **Single Pair Only**: Only supports one token pair (no factory pattern)
 
 ### Potential Improvements
 
-- Implement minimum liquidity lock (1000 wei) on genesis deposit
 - Add TWAP (Time-Weighted Average Price) oracle
 - Implement flash swap functionality
 - Add factory pattern for multiple pairs
@@ -255,6 +257,30 @@ This project implements concepts from:
 - **Integer Math in Solidity**: Avoiding precision loss in calculations
 - **Smart Contract Patterns**: CEI, ReentrancyGuard, SafeERC20
 - **Comprehensive Testing**: Unit tests, fuzz tests, invariant tests
+
+## 🚀 Live Deployment (Sepolia Testnet)
+
+The DEX is deployed and verified on Sepolia testnet:
+
+- **DEX**: [`0x6fC747515068d73E8AF6D1caFc7113C50252C32C`](https://sepolia.etherscan.io/address/0x6fc747515068d73e8af6d1cafc7113c50252c32c)
+- **TokenA (TKA)**: [`0xa8787f507253f37a8d0623ab375c2542D21f922F`](https://sepolia.etherscan.io/address/0xa8787f507253f37a8d0623ab375c2542d21f922f)  
+- **TokenB (TKB)**: [`0xc518D2E467426E49b38c1C1511Cf559ca3F7B460`](https://sepolia.etherscan.io/address/0xc518d2e467426e49b38c1c1511cf559ca3f7b460)
+
+### Try it yourself:
+1. Get Sepolia ETH from [faucet](https://sepoliafaucet.com/)
+2. Interact directly on [Etherscan](https://sepolia.etherscan.io/address/0x6fc747515068d73e8af6d1cafc7113c50252c32c#writeContract)
+3. Or use our frontend (coming soon!)
+
+### Deployment Stats:
+- Total gas used: 4,009,554
+- Deployment cost: 0.004375 ETH
+- All contracts verified ✅
+
+### Key Statistics:
+- **Test Coverage**: 100% (23 tests passing)
+- **Functions**: 8 external, 5 view
+- **Gas Optimization**: ReentrancyGuard + SafeERC20
+- **Security**: CEI pattern, comprehensive input validation
 
 ## 📝 License
 

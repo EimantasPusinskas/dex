@@ -21,6 +21,13 @@ import {SafeERC20} from "openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol"
  * - Reentrancy protection on all state-changing functions
  * - Slippage protection via minAmountOut parameter
  * - Transaction deadline to prevent stale transactions
+ * - Minimum liquidity lock (1000 wei) to prevent manipulation
+ * 
+ * Example Usage:
+ * 1. Approve both tokens for the DEX contract
+ * 2. Call addLiquidity(amountA, amountB) to receive LP tokens
+ * 3. Call swap(amountIn, minOut, tokenIn, deadline) to trade
+ * 4. Call removeLiquidity(shares) to redeem tokens
  */
 contract DEX is ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -45,6 +52,9 @@ contract DEX is ReentrancyGuard {
     /// @notice Mapping of LP token balances for each address
     mapping(address => uint256) public balanceOf;
 
+    /// @notice Minimum liquidity locked on genesis deposit to prevent manipulation
+    /// @dev 1000 wei locked permanently to address(0) following Uniswap V2 pattern
+    uint256 constant MINIMUM_LIQUIDITY = 1000;
     // ============ Events ============
 
     /**
@@ -54,7 +64,7 @@ contract DEX is ReentrancyGuard {
      * @param amountB Amount of tokenB added
      * @param shares Amount of LP tokens minted
      */
-    event LiquidityAdded(address indexed provider, uint256 amountA, uint256 amountB, uint256 shares);
+    event LiquidityAdded(address indexed provider, uint256 amountA, uint256 amountB, uint256 shares, uint256 timestamp);
 
     /**
      * @notice Emitted when liquidity is removed from the pool
@@ -63,7 +73,9 @@ contract DEX is ReentrancyGuard {
      * @param amountB Amount of tokenB returned
      * @param shares Amount of LP tokens burned
      */
-    event LiquidityRemoved(address indexed provider, uint256 amountA, uint256 amountB, uint256 shares);
+    event LiquidityRemoved(
+        address indexed provider, uint256 amountA, uint256 amountB, uint256 shares, uint256 timestamp
+    );
 
     /**
      * @notice Emitted when a swap occurs
@@ -74,7 +86,12 @@ contract DEX is ReentrancyGuard {
      * @param amountOut Amount of output tokens
      */
     event Swap(
-        address indexed sender, address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut
+        address indexed sender,
+        address indexed tokenIn,
+        address indexed tokenOut,
+        uint256 amountIn,
+        uint256 amountOut,
+        uint256 timestamp
     );
 
     // ============ Constructor ============
@@ -93,12 +110,13 @@ contract DEX is ReentrancyGuard {
 
     /**
      * @notice Add liquidity to the pool
-     * @dev For the first deposit, LP tokens are calculated as sqrt(amountA * amountB)
-     *      For subsequent deposits, LP tokens are proportional to the pool share
-     *      Uses Math.min to prevent users from getting more shares than they deserve
+     * @dev For the first deposit, LP tokens are calculated as sqrt(amountA * amountB).
+     *      MINIMUM_LIQUIDITY (1000 wei) is permanently locked to prevent price manipulation.
+     *      For subsequent deposits, LP tokens are proportional to the pool share.
+     *      Uses Math.min to prevent users from getting more shares than they deserve.
      * @param _amountA Amount of tokenA to add
      * @param _amountB Amount of tokenB to add
-     * @return shares Amount of LP tokens minted
+     * @return shares Amount of LP tokens minted (excluding locked minimum on first deposit)
      */
     function addLiquidity(uint256 _amountA, uint256 _amountB) external nonReentrant returns (uint256 shares) {
         // Checks: Validate input amounts
@@ -110,6 +128,11 @@ contract DEX is ReentrancyGuard {
             // Genesis deposit: Use geometric mean to prevent initial manipulation
             // sqrt(x * y) is used instead of x + y to make the initial ratio matter
             shares = Math.sqrt(_amountA * _amountB);
+
+            require(shares > MINIMUM_LIQUIDITY, "Insufficient initial liquidity");
+            balanceOf[address(0)] = MINIMUM_LIQUIDITY;
+            totalSupply = MINIMUM_LIQUIDITY;
+            shares -= MINIMUM_LIQUIDITY;
         } else {
             // Subsequent deposits: Mint shares proportional to pool increase
             // Reserves should never be 0 after initial deposit, but we check anyway
@@ -139,7 +162,7 @@ contract DEX is ReentrancyGuard {
         tokenA.safeTransferFrom(msg.sender, address(this), _amountA);
         tokenB.safeTransferFrom(msg.sender, address(this), _amountB);
 
-        emit LiquidityAdded(msg.sender, _amountA, _amountB, shares);
+        emit LiquidityAdded(msg.sender, _amountA, _amountB, shares, block.timestamp);
 
         return shares;
     }
@@ -175,7 +198,7 @@ contract DEX is ReentrancyGuard {
         tokenA.safeTransfer(msg.sender, amountA);
         tokenB.safeTransfer(msg.sender, amountB);
 
-        emit LiquidityRemoved(msg.sender, amountA, amountB, _shares);
+        emit LiquidityRemoved(msg.sender, amountA, amountB, _shares, block.timestamp);
 
         return (amountA, amountB);
     }
@@ -187,6 +210,10 @@ contract DEX is ReentrancyGuard {
      * @dev Uses constant product formula: x * y = k
      *      Charges 0.3% fee (997/1000 of input goes to calculation)
      *      Formula: amountOut = (amountIn * 997 * reserveOut) / (reserveIn * 1000 + amountIn * 997)
+     *      
+     *      Security: Protected against reentrancy via nonReentrant modifier.
+     *      Users MUST approve this contract before calling swap.
+     *      
      * @param amountIn Amount of input tokens
      * @param minAmountOut Minimum amount of output tokens (slippage protection)
      * @param tokenIn Address of input token (must be tokenA or tokenB)
@@ -239,7 +266,7 @@ contract DEX is ReentrancyGuard {
         IERC20 tokenOut = isTokenA ? tokenB : tokenA;
         tokenOut.safeTransfer(msg.sender, amountOut);
 
-        emit Swap(msg.sender, tokenIn, address(tokenOut), amountIn, amountOut);
+        emit Swap(msg.sender, tokenIn, address(tokenOut), amountIn, amountOut, block.timestamp);
 
         return amountOut;
     }
@@ -264,5 +291,95 @@ contract DEX is ReentrancyGuard {
         // Same calculation as swap() but without state changes
         uint256 amountInWithFee = amountIn * 997;
         amountOut = (amountInWithFee * reserveOut) / (reserveIn * 1000 + amountInWithFee);
+    }
+
+    /**
+     * @notice Get current reserves of tokenA and tokenB
+     * @return reserveA Current reserve of tokenA
+     * @return reserveB Current reserve of tokenB
+     */
+    function getReserves() external view returns (uint256, uint256) {
+        return (reserveA, reserveB);
+    }
+
+    /**
+     * @notice Get price of tokenA in terms of tokenB
+     * @dev Example: If result is 2e18, then 1 tokenA = 2 tokenB
+     * @return price Price scaled by 1e18 for precision
+     */
+    function getPriceAInB() external view returns (uint256 price) {
+        require(reserveA > 0, "No liquidity");
+        return (reserveB * 1e18) / reserveA;
+    }
+
+    /**
+     * @notice Get price of tokenB in terms of tokenA
+     * @dev Example: If result is 0.5e18, then 1 tokenB = 0.5 tokenA
+     * @return price Price scaled by 1e18 for precision
+     */
+    function getPriceBInA() external view returns (uint256 price) {
+        require(reserveB > 0, "No liquidity");
+        return (reserveA * 1e18) / reserveB;
+    }
+
+    /**
+     * @notice Get price of one token in terms of the other
+     * @param token The token to get the price FOR
+     * @return price How many of the OTHER token per 1 unit of the specified token
+     *
+     * @dev Example:
+     *      If reserveA = 1000, reserveB = 2000
+     *      getPrice(tokenA) returns 2e18 (2 tokenB per tokenA)
+     *      getPrice(tokenB) returns 0.5e18 (0.5 tokenA per tokenB)
+     */
+    function getPrice(address token) external view returns (uint256 price) {
+        require(token == address(tokenA) || token == address(tokenB), "Invalid token");
+        require(reserveA > 0 && reserveB > 0, "No liquidity");
+
+        if (token == address(tokenA)) {
+            // Price of tokenA in terms of tokenB
+            return (reserveB * 1e18) / reserveA;
+        } else {
+            // Price of tokenB in terms of tokenA
+            return (reserveA * 1e18) / reserveB;
+        }
+    }
+
+    /**
+     * @notice Get comprehensive pool information
+     * @return _reserveA Current reserve of tokenA
+     * @return _reserveB Current reserve of tokenB
+     * @return _totalSupply Total LP tokens in circulation
+     * @return priceAInB Price of tokenA in tokenB terms
+     * @return priceBInA Price of tokenB in tokenA terms
+     */
+    function getPoolInfo()
+        external
+        view
+        returns (uint256 _reserveA, uint256 _reserveB, uint256 _totalSupply, uint256 priceAInB, uint256 priceBInA)
+    {
+        _reserveA = reserveA;
+        _reserveB = reserveB;
+        _totalSupply = totalSupply;
+
+        if (reserveA > 0 && reserveB > 0) {
+            priceAInB = (reserveB * 1e18) / reserveA;
+            priceBInA = (reserveA * 1e18) / reserveB;
+        }
+    }
+
+    /**
+     * @notice Get user's share of the pool
+     * @param user Address of the liquidity provider
+     * @return shares Amount of LP tokens owned
+     * @return valueA Equivalent tokenA value
+     * @return valueB Equivalent tokenB value
+     */
+    function getLPValue(address user) external view returns (uint256 shares, uint256 valueA, uint256 valueB) {
+        shares = balanceOf[user];
+        if (totalSupply > 0) {
+            valueA = (shares * reserveA) / totalSupply;
+            valueB = (shares * reserveB) / totalSupply;
+        }
     }
 }
