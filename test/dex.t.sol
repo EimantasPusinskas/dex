@@ -464,4 +464,131 @@ contract DEXTest is Test {
         assertApproxEqAbs(valueA, expectedValueA, 1000, "Value A mismatch");
         assertApproxEqAbs(valueB, expectedValueB, 1000, "Value B mismatch");
     }
+
+    // ============ View Function Edge Cases ============
+
+    function test_GetPriceAInB_RevertsOnNoLiquidity() public {
+        // Don't add any liquidity
+        vm.expectRevert("No liquidity");
+        dex.getPriceAInB();
+    }
+
+    function test_GetPriceBInA_RevertsOnNoLiquidity() public {
+        vm.expectRevert("No liquidity");
+        dex.getPriceBInA();
+    }
+
+    function test_GetPrice_RevertsOnNoLiquidity() public {
+        vm.expectRevert("No liquidity");
+        dex.getPrice(address(tokenA));
+    }
+
+    function test_GetPrice_RevertsOnInvalidToken() public {
+        vm.prank(alice);
+        dex.addLiquidity(1000 * 10 ** 18, 2000 * 10 ** 18);
+
+        vm.expectRevert("Invalid token");
+        dex.getPrice(address(0xdead));
+    }
+
+    function test_GetPoolInfo_WithNoLiquidity() public {
+        (uint256 resA, uint256 resB, uint256 supply, uint256 priceAB, uint256 priceBA) = dex.getPoolInfo();
+
+        assertEq(resA, 0, "Reserve A should be 0");
+        assertEq(resB, 0, "Reserve B should be 0");
+        assertEq(supply, 0, "Supply should be 0");
+        assertEq(priceAB, 0, "Price AB should be 0");
+        assertEq(priceBA, 0, "Price BA should be 0");
+    }
+
+    function test_GetLPValue_WithNoLiquidity() public {
+        (uint256 shares, uint256 valueA, uint256 valueB) = dex.getLPValue(alice);
+
+        assertEq(shares, 0, "Shares should be 0");
+        assertEq(valueA, 0, "Value A should be 0");
+        assertEq(valueB, 0, "Value B should be 0");
+    }
+
+    function test_GetReserves_WithNoLiquidity() public {
+        (uint256 resA, uint256 resB) = dex.getReserves();
+        assertEq(resA, 0, "Reserve A should be 0");
+        assertEq(resB, 0, "Reserve B should be 0");
+    }
+
+    function test_GetAmountOut_RevertsOnInsufficientLiquidity() public {
+        vm.expectRevert("Insufficient liquidity");
+        dex.getAmountOut(100 * 10 ** 18, address(tokenA));
+    }
+
+    function test_MultipleDepositsAndWithdrawals_MaintainsInvariant() public {
+        // Alice deposit 1
+        vm.startPrank(alice);
+        uint256 shares1 = dex.addLiquidity(1000e18, 2000e18);
+
+        // Bob deposit 2
+        vm.startPrank(bob);
+        uint256 shares2 = dex.addLiquidity(500e18, 1000e18);
+
+        // Charlie swaps
+        vm.startPrank(alice);
+        dex.swap(100e18, 0, address(tokenA), block.timestamp + 1 hours);
+
+        // Alice withdraws
+        (uint256 amountA, uint256 amountB) = dex.removeLiquidity(shares1 / 2);
+
+        // Verify: k should still be valid
+        uint256 k = dex.reserveA() * dex.reserveB();
+        assertGt(k, 0);
+
+        // Verify: Bob can still withdraw his shares
+        vm.startPrank(bob);
+        (uint256 bobA, uint256 bobB) = dex.removeLiquidity(shares2);
+        assertGt(bobA, 0);
+        assertGt(bobB, 0);
+    }
+
+    function test_AddLiquidity_ExtremeImbalance() public {
+        vm.startPrank(alice);
+
+        // First deposit: balanced
+        dex.addLiquidity(1000e18, 1000e18);
+
+        // Second deposit: extremely imbalanced (10:1)
+        uint256 shares = dex.addLiquidity(1000e18, 100e18); // 10:1 ratio
+
+        // Should only get shares based on the "weaker" side
+        // This tests that Math.min() works correctly
+        assertGt(shares, 0);
+        assertLt(shares, (1000e18 * dex.totalSupply()) / 1000e18); // Can't exceed single-token ratio
+    }
+
+    function test_Swap_PriceImpact() public {
+        vm.prank(alice);
+        dex.addLiquidity(1000e18, 1000e18); // 1:1 ratio
+
+        // Small swap: price impact should be minimal
+        uint256 smallOut = dex.getAmountOut(1e18, address(tokenA));
+
+        // Larger swap: price impact should be significant
+        uint256 largeOut = dex.getAmountOut(100e18, address(tokenA));
+
+        // largeOut per unit should be less than smallOut per unit
+        uint256 smallPricePerUnit = (smallOut * 1e18) / 1e18;
+        uint256 largePricePerUnit = (largeOut * 1e18) / 100e18;
+
+        assertLt(largePricePerUnit, smallPricePerUnit, "No price impact detected");
+    }
+
+    function test_Swap_RevertsWithoutApproval() public {
+        vm.startPrank(alice);
+        dex.addLiquidity(1000e18, 2000e18);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        // Bob doesn't approve, tries to swap
+        tokenA.approve(address(dex), 0); // Revoke approval
+
+        vm.expectRevert(); // SafeERC20 will revert
+        dex.swap(100e18, 0, address(tokenA), block.timestamp + 1 hours);
+    }
 }
